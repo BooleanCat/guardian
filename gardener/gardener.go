@@ -265,6 +265,8 @@ func (g *Gardener) Create(spec garden.ContainerSpec) (ctr garden.Container, err 
 		return nil, err
 	}
 
+	///
+
 	actualSpec, err := g.Containerizer.Info(log, spec.Handle)
 	if err != nil {
 		return nil, err
