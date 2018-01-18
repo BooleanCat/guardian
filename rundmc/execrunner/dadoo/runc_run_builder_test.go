@@ -19,55 +19,83 @@ var _ = Describe("RuncRunBuilder", func() {
 	)
 
 	It("builds a runc exec command for the non-tty case", func() {
-		cmd := dadoo.BuildRuncCommand(runtimePath, "exec", processPath, ctrHandle, "", logfilePath)
+		cmds := dadoo.BuildRuncCommands(runtimePath, "exec", processPath, ctrHandle, "", logfilePath)
+		Expect(cmds).To(HaveLen(1))
+		cmd := cmds[0]
 		Expect(cmd.Path).To(Equal(runtimePath))
 		Expect(cmd.Args).To(Equal([]string{
 			runtimePath,
 			"--debug", "--log", logfilePath, "--log-format", "json",
 			"exec",
-			"-d", "--pid-file", filepath.Join(processPath, "pidfile"),
-			"-p", fmt.Sprintf("/proc/%d/fd/0", os.Getpid()),
+			"--pid-file", filepath.Join(processPath, "pidfile"),
+			"--detach", "--process", fmt.Sprintf("/proc/%d/fd/0", os.Getpid()),
 			ctrHandle,
 		}))
 	})
 
 	It("builds a runc exec command for the tty case", func() {
-		cmd := dadoo.BuildRuncCommand(runtimePath, "exec", processPath, ctrHandle, "path/to/socketfile", logfilePath)
+		cmds := dadoo.BuildRuncCommands(runtimePath, "exec", processPath, ctrHandle, "path/to/socketfile", logfilePath)
+		Expect(cmds).To(HaveLen(1))
+		cmd := cmds[0]
 		Expect(cmd.Path).To(Equal(runtimePath))
 		Expect(cmd.Args).To(Equal([]string{
 			runtimePath,
 			"--debug", "--log", logfilePath, "--log-format", "json",
 			"exec",
-			"-d", "--pid-file", filepath.Join(processPath, "pidfile"),
-			"-p", fmt.Sprintf("/proc/%d/fd/0", os.Getpid()),
+			"--pid-file", filepath.Join(processPath, "pidfile"),
+			"--detach", "--process", fmt.Sprintf("/proc/%d/fd/0", os.Getpid()),
 			"--tty", "--console-socket", "path/to/socketfile",
 			ctrHandle,
 		}))
 	})
 
-	It("builds a runc run command for the non-tty case", func() {
-		cmd := dadoo.BuildRuncCommand(runtimePath, "run", processPath, ctrHandle, "", logfilePath)
-		Expect(cmd.Path).To(Equal(runtimePath))
-		Expect(cmd.Args).To(Equal([]string{
+	It("builds runc create+start commands for the non-tty case", func() {
+		cmds := dadoo.BuildRuncCommands(runtimePath, "create", processPath, ctrHandle, "", logfilePath)
+		Expect(cmds).To(HaveLen(2))
+
+		createCmd := cmds[0]
+		Expect(createCmd.Path).To(Equal(runtimePath))
+		Expect(createCmd.Args).To(Equal([]string{
 			runtimePath,
 			"--debug", "--log", logfilePath, "--log-format", "json",
-			"run",
-			"-d", "--pid-file", filepath.Join(processPath, "pidfile"),
-			"--no-new-keyring", "-b", processPath,
+			"create",
+			"--pid-file", filepath.Join(processPath, "pidfile"),
+			"--no-new-keyring", "--bundle", processPath,
+			ctrHandle,
+		}))
+
+		runCmd := cmds[1]
+		Expect(runCmd.Path).To(Equal(runtimePath))
+		Expect(runCmd.Args).To(Equal([]string{
+			runtimePath,
+			"--debug", "--log", logfilePath, "--log-format", "json",
+			"start",
 			ctrHandle,
 		}))
 	})
 
-	It("builds a runc run command for the tty case", func() {
-		cmd := dadoo.BuildRuncCommand(runtimePath, "run", processPath, ctrHandle, "/some/socket", logfilePath)
-		Expect(cmd.Path).To(Equal(runtimePath))
-		Expect(cmd.Args).To(Equal([]string{
+	It("builds runc create+start commands for the tty case", func() {
+		cmds := dadoo.BuildRuncCommands(runtimePath, "create", processPath, ctrHandle, "/some/socket", logfilePath)
+		Expect(cmds).To(HaveLen(2))
+
+		createCmd := cmds[0]
+		Expect(createCmd.Path).To(Equal(runtimePath))
+		Expect(createCmd.Args).To(Equal([]string{
 			runtimePath,
 			"--debug", "--log", logfilePath, "--log-format", "json",
-			"run",
-			"-d", "--pid-file", filepath.Join(processPath, "pidfile"),
-			"--no-new-keyring", "-b", processPath,
+			"create",
+			"--pid-file", filepath.Join(processPath, "pidfile"),
+			"--no-new-keyring", "--bundle", processPath,
 			"--console-socket", "/some/socket",
+			ctrHandle,
+		}))
+
+		runCmd := cmds[1]
+		Expect(runCmd.Path).To(Equal(runtimePath))
+		Expect(runCmd.Args).To(Equal([]string{
+			runtimePath,
+			"--debug", "--log", logfilePath, "--log-format", "json",
+			"start",
 			ctrHandle,
 		}))
 	})

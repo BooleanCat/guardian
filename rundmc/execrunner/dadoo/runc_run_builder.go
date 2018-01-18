@@ -7,25 +7,27 @@ import (
 	"path/filepath"
 )
 
-func BuildRuncCommand(runtimePath, runMode, processPath, containerHandle, ttyConsoleSocket, logfilePath string) *exec.Cmd {
-	runtimeArgs := []string{
-		"--debug", "--log", logfilePath, "--log-format", "json",
-		runMode,
-		"-d",
-		"--pid-file", filepath.Join(processPath, "pidfile"),
-	}
+func BuildRuncCommands(runtimePath, runMode, processPath, containerHandle, ttyConsoleSocket, logfilePath string) []*exec.Cmd {
+	globalArgs := []string{"--debug", "--log", logfilePath, "--log-format", "json"}
+	runtimeArgs := append(globalArgs, runMode, "--pid-file", filepath.Join(processPath, "pidfile"))
 	runtimeArgs = append(runtimeArgs, runmodeArgs(runMode, processPath)...)
 	runtimeArgs = append(runtimeArgs, ttyArgs(runMode, ttyConsoleSocket)...)
 	runtimeArgs = append(runtimeArgs, containerHandle)
-	return exec.Command(runtimePath, runtimeArgs...)
+
+	cmds := []*exec.Cmd{exec.Command(runtimePath, runtimeArgs...)}
+	if runMode == "create" {
+		args := append(globalArgs, "start", containerHandle)
+		cmds = append(cmds, exec.Command(runtimePath, args...))
+	}
+	return cmds
 }
 
 func runmodeArgs(runMode, bundlePath string) []string {
-	if runMode == "run" {
-		return []string{"--no-new-keyring", "-b", bundlePath}
+	if runMode == "create" {
+		return []string{"--no-new-keyring", "--bundle", bundlePath}
 	}
 
-	return []string{"-p", fmt.Sprintf("/proc/%d/fd/0", os.Getpid())}
+	return []string{"--detach", "--process", fmt.Sprintf("/proc/%d/fd/0", os.Getpid())}
 }
 
 func ttyArgs(runMode, ttyConsoleSocket string) []string {

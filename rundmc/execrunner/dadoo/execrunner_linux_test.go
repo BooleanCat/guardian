@@ -235,10 +235,10 @@ var _ = Describe("Dadoo ExecRunner", func() {
 			)
 		})
 
-		Context("when the exec mode is 'run'", func() {
+		Context("when the exec mode is 'create'", func() {
 			BeforeEach(func() {
 				runner = dadoo.NewExecRunner("path-to-dadoo", "path-to-runc",
-					signallerFactory, fakeCommandRunner, false, "run")
+					signallerFactory, fakeCommandRunner, false, "create")
 			})
 
 			It("executes the dadoo binary with the correct arguments", func() {
@@ -248,7 +248,7 @@ var _ = Describe("Dadoo ExecRunner", func() {
 				Expect(fakeCommandRunner.StartedCommands()[0].Args).To(
 					ConsistOf(
 						"path-to-dadoo",
-						"run", "path-to-runc", processPath, processID,
+						"create", "path-to-runc", processPath, processID,
 					),
 				)
 			})

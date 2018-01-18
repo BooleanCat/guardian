@@ -12,6 +12,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -40,7 +41,7 @@ func run() int {
 	socketDirPath := flag.String("socket-dir-path", "", "path to a dir in which to store console sockets")
 	flag.Parse()
 
-	runMode := flag.Args()[0] // exec or run
+	runMode := flag.Args()[0] // exec or create
 	runtime := flag.Args()[1] // e.g. runc
 	processStateDir := flag.Args()[2]
 	containerId := flag.Args()[3]
@@ -71,7 +72,7 @@ func run() int {
 	}
 
 	ioWg := &sync.WaitGroup{}
-	var runcExecCmd *exec.Cmd
+	var runtimeCmds []*exec.Cmd
 	if *tty {
 		winsz, err := openFile(filepath.Join(processStateDir, "winsz"), os.O_RDWR)
 		defer closeFile(winsz)
@@ -84,75 +85,62 @@ func run() int {
 			return logAndExit(fmt.Sprintf("value for --socket-dir-path cannot exceed %d characters in length", MaxSocketDirPathLength))
 		}
 		ttySocketPath := setupTTYSocket(stdinR, stdoutW, winsz, pidFilePath, *socketDirPath, ioWg)
-		runcExecCmd = dadoo.BuildRuncCommand(runtime, runMode, processStateDir, containerId, ttySocketPath, logFile)
+		runtimeCmds = dadoo.BuildRuncCommands(runtime, runMode, processStateDir, containerId, ttySocketPath, logFile)
 	} else {
-		runcExecCmd = dadoo.BuildRuncCommand(runtime, runMode, processStateDir, containerId, "", logFile)
-		runcExecCmd.Stdin = stdinR
-		runcExecCmd.Stdout = stdoutW
-		runcExecCmd.Stderr = stderrW
+		runtimeCmds = dadoo.BuildRuncCommands(runtime, runMode, processStateDir, containerId, "", logFile)
+		createCtrCmd := runtimeCmds[0]
+		createCtrCmd.Stdin = stdinR
+		createCtrCmd.Stdout = stdoutW
+		createCtrCmd.Stderr = stderrW
 	}
 
 	// we need to be the subreaper so we can wait on the detached container process
 	system.SetSubreaper(os.Getpid())
 
-	if err := runcExecCmd.Start(); err != nil {
+	// TODO holy leaky abstractions batman
+	createStartSplit := false
+
+	// Run any runc setup commands. In the exec case, there will be none, and
+	// this loop will not execute. In the run case, there will be one: `runc
+	// create` the container, so that we can start it later.
+	for i := 0; i < len(runtimeCmds)-1; i++ {
+		createStartSplit = true
+		if err := runtimeCmds[i].Run(); err != nil {
+			return logAndExit(fmt.Sprintf(
+				"setup command '%s' failed: %s", strings.Join(runtimeCmds[i].Args, " "), err,
+			))
+		}
+	}
+
+	startCtrCmd := runtimeCmds[len(runtimeCmds)-1]
+	// TODO: this is not currently driven by a test!
+	startCtrCmd.SysProcAttr = &syscall.SysProcAttr{
+		Pdeathsig: syscall.SIGKILL,
+	}
+	if err := startCtrCmd.Start(); err != nil {
 		runcExitCodePipe.Write([]byte{2})
 		return 2
 	}
 
-	runcExitStatus := awaitRuncExit(runcExecCmd.Process)
-	logFD.Close() // No more logs from runc so close fd
+	procs := make(chan proc, 100) // TODO buffer size
+	runcExitStatus := make(chan int)
+	go reap(signals, procs, startCtrCmd.Process.Pid, runcExitStatus)
+	runcExitCodeWritten := make(chan struct{})
+	go awaitRuncExit(runcExitStatus, logFD, runcExitCodePipe, runcExitCodeWritten)
 
-	// also check that masterFD is received and streaming or whatevs
-	runcExitCodePipe.Write([]byte{byte(runcExitStatus)})
-	if runcExitStatus != 0 {
-		return 3 // nothing to wait for, container didn't launch
+	if !createStartSplit {
+		<-runcExitCodeWritten
 	}
 
-	containerPid, err := parsePid(pidFilePath)
-	check(err)
+	userProcessPid, err := parsePid(pidFilePath)
+	check(err, 44)
 
-	return waitForContainerToExit(processStateDir, containerPid, signals, ioWg)
-}
-
-func awaitRuncExit(runcProc *os.Process) int {
-	runcExitStatusCh := make(chan int)
-	go func() {
-		var status syscall.WaitStatus
-		var rusage syscall.Rusage
-		_, err := syscall.Wait4(runcProc.Pid, &status, 0, &rusage)
-		check(err) // Start succeeded but Wait4 failed, this can only be a programmer error
-		runcExitStatusCh <- status.ExitStatus()
-	}()
-
-	// Dadoo is waiting for `runc {exec|run} -d` to exit. This runc process has a
-	// child, runc[2:INIT], that will exec and become the user process. Just
-	// before execing, it reads the process metadata from a fifo. Once it's done
-	// this, its parent (runc -d) unblocks from pipe-opening and can exit.
-	//
-	// There is a race between this run operation and concurrent deletion of the
-	// same garden container. When deleting the container, runc SIGKILLs the
-	// container init process. Since this init process is PID1 in a pidns, the
-	// kernel first SIGKILLs all other members of this pidns. This includes
-	// runc[2:INIT], but not runc exec -d. Runc exec -d is not waiting on
-	// runc[2:INIT], so it becomes a zombie. Runc exec -d will never unblock,
-	// because no process will come along to open the other end of the fifo.
-	//
-	// Runc delete times out after 10 seconds, if the container init is still
-	// alive. It will still be alive, because the kernel won't kill it until all
-	// the zombies in the same pidns are reaped. We resolve this race by killing
-	// runc exec -d after 5 seconds.
-	//
-	// https://www.pivotaltracker.com/story/show/154242239
+	userProcessExitStatus := awaitUserProcessExit(processStateDir, userProcessPid, procs, ioWg)
 	select {
-	case runcExitStatus := <-runcExitStatusCh:
-		return runcExitStatus
-	case <-time.After(RuncExecTimeout):
-		fmt.Printf("runc process with PID %d timed out after %s\n", runcProc.Pid, RuncExecTimeout)
-		check(runcProc.Kill())
-		fmt.Println("killed runc")
-		return <-runcExitStatusCh
+	case <-runcExitCodeWritten:
+	case <-time.After(time.Second * 3): // TODO arbitrary?
 	}
+	return userProcessExitStatus
 }
 
 // If gdn server process dies, we need dadoo to keep stdout/err reader
@@ -170,31 +158,58 @@ func openStdioKeepAlivePipes(processStateDir string) (io.ReadCloser, io.ReadClos
 	return keepStdoutAlive, keepStderrAlive, nil
 }
 
-func waitForContainerToExit(processStateDir string, containerPid int, signals chan os.Signal, ioWg *sync.WaitGroup) (exitCode int) {
+type proc struct {
+	pid    int
+	status syscall.WaitStatus
+}
+
+func reap(signals <-chan os.Signal, procs chan<- proc, runcPid int, runcExit chan<- int) {
 	for range signals {
 		for {
 			var status syscall.WaitStatus
-			var rusage syscall.Rusage
-			wpid, err := syscall.Wait4(-1, &status, syscall.WNOHANG, &rusage)
+			wpid, err := syscall.Wait4(-1, &status, syscall.WNOHANG, &syscall.Rusage{})
 			if err != nil || wpid <= 0 {
 				break // wait for next SIGCHLD
 			}
-
-			if wpid == containerPid {
-				exitCode = status.ExitStatus()
-				if status.Signaled() {
-					exitCode = 128 + int(status.Signal())
-				}
-
-				ioWg.Wait() // wait for full output to be collected
-
-				check(ioutil.WriteFile(filepath.Join(processStateDir, "exitcode"), []byte(strconv.Itoa(exitCode)), 0600))
-				return exitCode
+			if wpid == runcPid {
+				runcExit <- status.ExitStatus()
 			}
+			procs <- proc{pid: wpid, status: status}
 		}
 	}
 
-	return logAndExit("ran out of signals") // cant happen
+	os.Exit(logAndExit("ran out of signals")) // cant happen
+}
+
+func awaitRuncExit(runcExitStatusCh <-chan int, logFD, runcExitCodePipe *os.File, runcExitCodeWritten chan<- struct{}) {
+	runcExitStatus := <-runcExitStatusCh
+	logFD.Close() // No more logs from runc so close fd
+
+	// also check that masterFD is received and streaming or whatevs
+	runcExitCodePipe.Write([]byte{byte(runcExitStatus)})
+	if runcExitStatus != 0 {
+		fmt.Printf("runc exited with %d\n", runcExitStatus)
+		os.Exit(3) // nothing to wait for, container didn't launch
+	}
+	close(runcExitCodeWritten)
+}
+
+func awaitUserProcessExit(processStateDir string, userProcessPid int, procs <-chan proc, ioWg *sync.WaitGroup) int {
+	for proc := range procs {
+		if proc.pid == userProcessPid {
+			exitCode := proc.status.ExitStatus()
+			if proc.status.Signaled() {
+				exitCode = 128 + int(proc.status.Signal())
+			}
+
+			ioWg.Wait() // wait for full output to be collected
+
+			check(ioutil.WriteFile(filepath.Join(processStateDir, "exitcode"), []byte(strconv.Itoa(exitCode)), 0600), 3)
+			return exitCode
+		}
+	}
+
+	return logAndExit("ran out of child processes") // can't happen
 }
 
 func openStdioAndExitFifos(processStateDir string) (io.ReadCloser, io.WriteCloser, io.WriteCloser, error) {
@@ -223,11 +238,11 @@ func openFile(path string, flags int) (*os.File, error) {
 
 func setupTTYSocket(stdin io.Reader, stdout io.Writer, winszFifo io.Reader, pidFilePath, sockDirBase string, ioWg *sync.WaitGroup) string {
 	sockDir, err := ioutil.TempDir(sockDirBase, "")
-	check(err)
+	check(err, 4)
 
 	ttySockPath := filepath.Join(sockDir, "tty.sock")
 	l, err := net.Listen("unix", ttySockPath)
-	check(err)
+	check(err, 5)
 
 	//go to the background and set master
 	go func(ln net.Listener) (err error) {
@@ -236,7 +251,7 @@ func setupTTYSocket(stdin io.Reader, stdout io.Writer, winszFifo io.Reader, pidF
 		defer func() {
 			if err != nil {
 				killProcess(pidFilePath)
-				check(err)
+				check(err, 6)
 			}
 		}()
 
@@ -343,8 +358,12 @@ func logAndExit(msg string) int {
 	return 2
 }
 
-func check(err error) {
+// TODO roll back number thing
+func check(err error, count int) {
 	if err != nil {
+		fmt.Println("!!!")
+		fmt.Println(count)
+		fmt.Println("!!!")
 		fmt.Println(err)
 		os.Exit(2)
 	}

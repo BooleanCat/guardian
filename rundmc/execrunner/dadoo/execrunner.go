@@ -161,7 +161,7 @@ func buildDadooCommand(tty bool, dadooPath, dadooRunMode, runcPath, processID, p
 		dadooArgs = append(dadooArgs, "-tty")
 	}
 	dadooArgs = append(dadooArgs, dadooRunMode, runcPath, processPath)
-	if dadooRunMode == "run" {
+	if dadooRunMode == "create" {
 		dadooArgs = append(dadooArgs, processID)
 	} else {
 		dadooArgs = append(dadooArgs, sandboxHandle)

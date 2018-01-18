@@ -149,7 +149,7 @@ var _ = Describe("Dadoo", func() {
 			dadooArgs = append(dadooArgs, mode, "runc", processDir, filepath.Base(bundlePath))
 			cmd := exec.Command(dadooBinPath, dadooArgs...)
 
-			if mode == "run" {
+			if mode == "create" {
 				bundle = bundle.WithProcess(processSpec)
 				Expect(bundleSaver.Save(bundle, bundlePath)).To(Succeed())
 			} else {
@@ -196,7 +196,7 @@ var _ = Describe("Dadoo", func() {
 				})
 
 				It("if the process is signalled the exitcode should be 128 + the signal number", func() {
-					if mode == "run" {
+					if mode == "create" {
 						Skip("you can't kill PID 1, even in a PID namespace")
 					}
 
@@ -616,9 +616,9 @@ var _ = Describe("Dadoo", func() {
 			itRunsRunc()
 		})
 
-		Describe("run", func() {
+		Describe("create", func() {
 			BeforeEach(func() {
-				mode = "run"
+				mode = "create"
 			})
 
 			itRunsRunc()
@@ -761,7 +761,7 @@ var _ = Describe("Dadoo", func() {
 			})
 		})
 
-		Describe("dadoo run", func() {
+		Describe("dadoo create", func() {
 			Context("not requesting a TTY", func() {
 				It("should write to the sync pipe when streaming pipes are open", func(done Done) {
 					bundle = bundle.WithProcess(specs.Process{
@@ -776,7 +776,7 @@ var _ = Describe("Dadoo", func() {
 					defer syncPipeR.Close()
 					defer syncPipeW.Close()
 
-					cmd := exec.Command(dadooBinPath, "run", "runc", processDir, filepath.Base(bundlePath))
+					cmd := exec.Command(dadooBinPath, "create", "runc", processDir, filepath.Base(bundlePath))
 					cmd.ExtraFiles = []*os.File{
 						mustOpen("/dev/null"),
 						runcLogFile,
@@ -797,39 +797,6 @@ var _ = Describe("Dadoo", func() {
 					Expect(err).NotTo(HaveOccurred())
 
 					Eventually(sess).Should(gexec.Exit(24))
-
-					close(done)
-				}, 10.0)
-
-				It("doesn't hang when runc doesn't exit quickly", func(done Done) {
-					Expect(bundleSaver.Save(bundle, bundlePath)).To(Succeed())
-
-					syncPipeR, syncPipeW, err := os.Pipe()
-					Expect(err).NotTo(HaveOccurred())
-					defer syncPipeR.Close()
-					defer syncPipeW.Close()
-
-					cmd := exec.Command(dadooBinPath, "run", fakeRuncBinPath, processDir, filepath.Base(bundlePath))
-					cmd.ExtraFiles = []*os.File{
-						mustOpen("/dev/null"),
-						runcLogFile,
-						syncPipeW,
-					}
-					// simulate the `runc run -d` hanging
-					cmd.Env = append(os.Environ(), "SLEEP_SECONDS=20")
-
-					sess, err := gexec.Start(cmd, GinkgoWriter, GinkgoWriter)
-					Expect(err).NotTo(HaveOccurred())
-					openIOPipes()
-
-					_, err = os.Open(stdoutPipe)
-					Expect(err).NotTo(HaveOccurred())
-
-					syncMsg := make([]byte, 1)
-					_, err = syncPipeR.Read(syncMsg)
-					Expect(err).NotTo(HaveOccurred())
-
-					Eventually(sess).Should(gexec.Exit(3))
 
 					close(done)
 				}, 10.0)
@@ -866,7 +833,7 @@ var _ = Describe("Dadoo", func() {
 						})
 
 						It("exits with 2", func() {
-							dadooCmd := exec.Command(dadooBinPath, "-tty", "-socket-dir-path", string(longerThanAllowedSocketPath), "run", "runc", processDir, filepath.Base(bundlePath))
+							dadooCmd := exec.Command(dadooBinPath, "-tty", "-socket-dir-path", string(longerThanAllowedSocketPath), "create", "runc", processDir, filepath.Base(bundlePath))
 							dadooCmd.ExtraFiles = []*os.File{mustOpen("/dev/null"), runcLogFile, mustOpen("/dev/null")}
 
 							stdout := gbytes.NewBuffer()
@@ -882,7 +849,7 @@ var _ = Describe("Dadoo", func() {
 
 					Context("when tty setup fails", func() {
 						It("kills the process and exits with 2", func() {
-							dadooCmd := exec.Command(dadooBinPath, "-tty", "-socket-dir-path", bundlePath, "run", fakeRuncBinPath, processDir, filepath.Base(bundlePath))
+							dadooCmd := exec.Command(dadooBinPath, "-tty", "-socket-dir-path", bundlePath, "create", fakeRuncBinPath, processDir, filepath.Base(bundlePath))
 							dadooCmd.ExtraFiles = []*os.File{mustOpen("/dev/null"), runcLogFile, mustOpen("/dev/null")}
 
 							stdout := gbytes.NewBuffer()

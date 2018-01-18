@@ -246,12 +246,12 @@ var _ = Describe("Runtime Plugin", func() {
 						"--log", logfileMatcher,
 						"--log-format", "json",
 						"exec",
-						"-p", MatchRegexp(".*"),
+						"--process", MatchRegexp(".*"),
 						"--pid-file", MatchRegexp(".*"),
 						handle,
 					}
 					if runtime.GOOS != "windows" {
-						pluginArgs = append(pluginArgs, "-d")
+						pluginArgs = append(pluginArgs, "--detach")
 					}
 					Expect(readPluginArgs(argsFilepath)).To(ConsistOf(pluginArgs))
 
