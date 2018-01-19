@@ -18,85 +18,51 @@
 #include <unistd.h>
 #include <linux/sched.h>
 #include <linux/fcntl.h>
+#define _GNU_SOURCE
+#include <sched.h>
 
 #include "pwd.h"
 
 /* create a directory; chown only if newly created */
-int mkdir_as(const char *dir, uid_t uid, gid_t gid) {
-  int rv;
-
-  rv = mkdir(dir, 0755);
-  if(rv == 0) {
-    /* new directory; set ownership */
-    return chown(dir, uid, gid);
-  } else {
-    if(errno == EEXIST) {
-      /* if directory already exists, leave ownership as-is */
-      return 0;
-    } else {
-      /* if any other error, abort */
-      return rv;
-    }
-  }
-
-  /* unreachable */
-  return -1;
+static int mkdir_as(const char *dir, uid_t uid, gid_t gid) {
+  int rv = mkdir(dir, 0755);
+  if(rv == 0) return chown(dir, uid, gid);
+  if(errno == EEXIST) return 0;
+  return rv;
 }
 
 /* recursively mkdir with directories owned by a given user */
-int mkdir_p_as(const char *dir, uid_t uid, gid_t gid) {
+static int mkdir_p_as(const char *dir, uid_t uid, gid_t gid) {
   char tmp[PATH_MAX];
   char *p = NULL;
   size_t len;
   int rv;
 
   /* copy the given dir as it'll be mutated */
-  snprintf(tmp, sizeof(tmp), "%s", dir);
+  strcpy(tmp, dir);
   len = strlen(tmp);
 
   /* strip trailing slash */
-  if(tmp[len - 1] == '/')
-    tmp[len - 1] = 0;
+  if(tmp[len - 1] == '/') tmp[len - 1] = 0;
 
   for(p = tmp + 1; *p; p++) {
-    if(*p == '/') {
-      /* temporarily null-terminte the string so that mkdir only creates this
-       * path segment */
-      *p = 0;
+    if (*p != '/') continue;
 
-      /* mkdir with truncated path segment */
-      rv = mkdir_as(tmp, uid, gid);
-      if(rv == -1) {
-        return rv;
-      }
+    /* temporarily null-terminte the string so that mkdir only creates this
+     * path segment */
+    *p = 0;
 
-      /* restore path separator */
-      *p = '/';
-    }
+    /* mkdir with truncated path segment */
+    rv = mkdir_as(tmp, uid, gid);
+    if(rv == -1) return rv;
+
+    /* restore path separator */
+    *p = '/';
   }
 
   /* create final destination */
   return mkdir_as(tmp, uid, gid);
 }
-
-
-#ifndef execveat
-/**
- * We need to define execveat here since glibc does not provide a wrapper
- * for this syscall yet. This code will not run once glibc implements this.
- */
-#if defined (__PPC64__)
-#define EXECVEAT_CODE 362
-#else
-#define EXECVEAT_CODE 322
-#endif
-int execveat(int fd, const char *path, char **argv, char **envp, int flags) {
-    return syscall(EXECVEAT_CODE, fd, path, argv, envp, flags);
-}
-#endif
-
-/* nothing seems to define this... */
-int setns(int fd, int nstype);
 
 int main(int argc, char **argv) {
   char *tarpath;
